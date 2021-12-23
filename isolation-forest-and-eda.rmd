@@ -1,0 +1,945 @@
+---
+title: "Isolation Forest and EDA for the Taylor Manifest Anxiety test"
+output: 
+  html_document:
+    toc: true
+    code_folding: "hide"
+    theme: readable    
+---
+
+
+```{r, include=FALSE}
+devtools::install_github("hadley/emo")
+install.packages("ggnewscale")
+install.packages("isotree")
+library(data.table)
+library(tidyverse)
+library(scales)
+library(emo)
+#library(factoextra)
+library(isotree)
+library(data.tree)
+library(ggrepel)
+library(ggnewscale)
+library(cowplot)
+library(tidytext)
+library(RColorBrewer)
+library(emo)
+theme_set(theme_light())
+
+rm(list=ls())
+theme_set(theme_light())
+plot_colors = c(brewer.pal(n = 5, name = "Pastel1"), brewer.pal(n = 8, name = "Pastel1")[8])
+
+
+input = fread("../input/depression-anxiety-stress-scales/DASS_data_21.02.19/data.csv")
+
+# Fixing year of birth entries
+input[age > 1000, age:= 2021 - age]
+
+# Fixing familysize to be at least 1
+input[familysize == 0, familysize := 1]
+
+# Converting categorical columns to factors
+
+input[, gender := factor(gender, labels = c("Unknown", "Male", "Female", "Other"))]
+input[, education := factor(education, labels = c("Unknown", "Less than high school", "High school", "University degree", "Graduate degree"))]
+input[, urban := factor(urban, labels = c("Unknown", "Rural (country side)", "Suburban", "Urban (town, city)"))]
+input[, gender := factor(gender, labels = c("Unknown", "Male", "Female", "Other"))]
+input[, engnat := factor(engnat, labels = c("Unknown", "Yes", "No"))]
+input[, hand := factor(hand, labels = c("Unknown", "Right", "Left", "Both"))]
+input[, orientation := factor(orientation, labels = c("Unknown", "Heterosexual", "Bisexual", "Homosexual", "Asexual", "Other"))]
+
+
+```
+
+The data that we will explore in this notebook are the survey answers to an online questionnaire that aims to assess personality traits and whether the subject shows certain emotional states (depression, anxiety, stress).  
+It is worth noting that it is very hard to assess data reliability and draw definitive conclusions from the data, as the test was freely administered and the replies were not checked. Furthermore, the fact that a person voluntarily takes the test might pose a certain [selection bias](https://en.wikipedia.org/wiki/Selection_bias) that further restricts our ability to generalise.  
+Nevertheless, this is a very rich dataset that can be analysed in many different ways. Let's get on with it!
+
+# 1. Time to clean `r emo::ji("broom")` 
+
+The dataset has not been checked for outliers and therefore it is good practice to try to see whether we can remove dubious observations before we start doing an analysis.  
+
+In order to do so we have to get a basic understanding of how the dataset is structured:
+
+1. **Responses to 42 DAS (Depression Anxiety Stress) survey questions which include:**  
+Answers ranging from 1 ("Did not apply to me at all") to 4 ("Applied to me very much, or most of the time")  
+Time elapsed on each question  
+The order in which the questions were shown to the participants
+
+2. **Answers to TIPI (Ten Item Personality Inventory) questions ranging from 1 ("Disagree strongly") to 7 ("Agree** **strongly")**
+
+3. **A check list of 16 English words (3 words were not real words and were used for calibration) where the** **participants could select whether they know them or not** 
+
+4. **Demographic information questions including:**  
+  Education  
+  Area where the participant lived as a child  
+  Gender  
+  English as native language  
+  Age  
+  Hand the participant uses for writing  
+  Religion  
+  Sexual orientation  
+  Race  
+  Whether the participant voted in a national election in the last year  
+  Marital status  
+  Family size of the participant (including himself/herself)  
+  Major of the participants' studies  
+  
+5. **Information taken from the participant's internet connection including:**  
+  Country  
+  Screen size  
+  Uniqueness of the network  
+  Source where the user found the information about the test
+
+
+
+## 1.1 Isolation Forest `r emo::ji("tree")` 
+
+To clean the dataset we can use an unsupervised outlier detection (or clustering) algorithm.    
+We have to keep in mind the following considerations:  
+1. We are verging on the high side for computing all the distances in the dataset (given the RAM available in Kaggle), which can be a limitation for distance based clustering algorithms such as K-means.  
+2. The dataset contains plenty of categorical variables.
+
+In order to address both of these concerns, I chose to use an Isolation Forest for the task. But before we get into the code, let's have a look at what an Isolation Forest is.
+
+### 1.1.1 What is an Isolation Forest?
+
+**Main idea: Outliers are few and their values differ from normal instances, which makes them easier to isolate.**
+
+This relatively straightforward observation is the basis of the algorithm, which can be summarised in the following 3 steps:
+
+*1. Create multiple decision trees with splits determined randomly both in terms of which variable to split on and* *which value.*  
+*2. For each observation in the dataset calculate the average path until it is isolated over all trees and use this* *path length to calculate an anomaly score.*  
+*3. Shorter path = Higher score = More likely an outlier  |  Longer path = Lower score = Less likely an outlier*
+
+
+In my experience the best way to undestand an algorithm is to implement it for a small example dataset. For this reason I implemented the Isolation Forest algorithm for a limited subset of the IRIS dataset and only the 'Sepal length' and 'Sepal width' variables.
+
+### 1.1.2 Bob and Ernie's adventure through the (Isolation) forest
+
+The goal of the example is to track two specific observations through 10 trees and see how deep in the tree one has to go until they are isolated from the rest of the datasete. Let's meet our two observations:
+
+```{r introducing Bob and Ernie, echo=F}
+data("iris")
+iris_inp = as.data.table(iris)[Species == "setosa", .(Sepal.Length, Sepal.Width)]
+
+
+set.seed(5)
+iris_inp = iris_inp[sample(.N, 13)]
+# Removing duplicated rows
+iris_inp = iris_inp[!duplicated(iris_inp)]
+
+iris_inp[, Name := "Neither Bob nor Ernie"]
+iris_inp[Sepal.Length == 4.8 & Sepal.Width == 3.4, Name := "Ernie"]
+iris_inp[Sepal.Length > 5.4 & Sepal.Width == 4.4, Name:= "Bob"]
+
+
+ggplot(iris_inp, aes(x= Sepal.Length, y = Sepal.Width, color = Name)) +
+  geom_point(size=2.5) +
+  geom_text_repel(size = 6, aes(label=ifelse(Name %in% c("Bob", "Ernie"), Name,"")), box.padding = 0.5) +
+  scale_colour_manual(values = c("Bob" = "purple", "Ernie"="chartreuse4", "Neither Bob nor Ernie"="grey"), guide="none") +
+  labs(title = "Introducing Bob and Ernie") +
+  theme(panel.grid = element_blank())
+
+```
+
+We can see that Ernie looks pretty average given the dataset, he is quite close to a number of other observations.
+On the other hand, Bob is on the top right corner and looks like he could be a potential outlier. 
+
+We will create some example Decision Trees and we will keep track of both our friends.
+The algorithm splits the dataset at each node based on either sepal width or sepal length (randomly selected) and then based on a value in the available value range for the selected variable.
+
+```{r tree update functions, include=F}
+node_characteristics <- function(partition, chosen_variable, chosen_value, leaf_number) {
+  ### Returns the node name and colour
+  
+  if (nrow(partition) == 1) {
+      if (nrow(partition[Name == "Bob"]) == 1) {
+        node_name = "Isolated Bob"
+      } else if (nrow(partition[Name == "Ernie"]) == 1) {
+        node_name = "Isolated Ernie"  
+      } else {
+        leaf_number = leaf_number + 1
+        node_name = paste0("Leaf node ", leaf_number, " (1 obs)")
+      }
+  } else {
+    node_name = paste(chosen_variable, "<", round(chosen_value,2))
+  }
+  
+  node_colour = ifelse(nrow(partition[Name %in% c("Bob", "Ernie")]) == 2, "lightblue",
+                  ifelse(nrow(partition[Name %in% c("Bob", "Ernie")]) == 0, "grey",
+                    ifelse(nrow(partition[Name == "Bob"]) == 1, "purple", "chartreuse4")))
+  
+  return(list(node_name, node_colour, leaf_number))
+  
+}
+
+update_node <- function(current_node, partition, available_params, 
+                        new_nodes_l, new_partitions_l, leaf_number, isolation_heights) {
+  
+  ### Updates the dataset and the tree nodes based on a random split
+  
+  # Picking the split
+  unique_lengths = partition[, uniqueN(Sepal.Length)]
+  unique_widths = partition[, uniqueN(Sepal.Width)]
+  
+  # To account for cases where there is only one unique value in one of the available variables
+  chosen_variable = ifelse(unique_lengths == 1, "Sepal.Width", 
+                           ifelse(unique_widths == 1, "Sepal.Length", sample(available_params, 1)))
+  chosen_value = runif(1, min=partition[, min(get(chosen_variable))], max=partition[, max(get(chosen_variable))])
+
+  # Getting the node characteristics
+  node_char = node_characteristics(partition, chosen_variable, chosen_value, leaf_number)
+  node_name = node_char[[1]]
+  node_colour = node_char[[2]]
+  leaf_number = node_char[[3]]
+  
+  if (node_name == "Isolated Bob") isolation_heights["Bob"] = my_tree$height - 2
+  if (node_name == "Isolated Ernie") isolation_heights["Ernie"] = my_tree$height - 2
+  
+  # Adding new node to the tree
+  new_node = current_node$AddChild(node_name)
+  SetNodeStyle(new_node, fillcolor = node_colour, fontname = "helvetica", keepExisting = T)
+  
+  # Updating the list keeping track of datasets and nodes 
+  # If a partition has 1 observation, it is a leaf node and therefore it does not need to be processed further
+  if (nrow(partition) > 1) {
+    new_nodes_l[[length(new_nodes_l) + 1]] = new_node
+    # Adding the node a second time so that both partitions have it 
+    new_nodes_l[[length(new_nodes_l) + 1]] = new_nodes_l[[length(new_nodes_l)]]
+    
+    new_partitions_l[[length(new_partitions_l) + 1]] = partition[get(chosen_variable) < chosen_value]
+    # The length will increase by one 
+    new_partitions_l[[length(new_partitions_l) + 1]] = partition[get(chosen_variable) >= chosen_value]
+  }
+  
+  return(list(new_nodes_l, new_partitions_l, leaf_number, isolation_heights))
+  
+}
+
+```
+
+
+
+```{r tree generation main, include=F}
+
+tree_l = list()
+isolation_height_l = list()
+
+for (iso_tree in 1:10) {
+  
+  # Initialising the tree
+  my_tree <- Node$new("Start")
+  SetGraphStyle(my_tree, rankdir = "TB")
+  SetNodeStyle(my_tree, style = "filled,rounded", shape = "box", fillcolor = "white", fontname = "helvetica", 
+               tooltip = GetDefaultTooltip, fontcolor = "black", fontsize = 20)
+  
+  available_params = c("Sepal.Length", "Sepal.Width")
+  
+  # How many leafs we have in the tree
+  leaf_number = 0
+  # At which height did Bob and Ernie get isolated
+  isolation_heights = c("Bob" = 0, "Ernie" = 0)
+  
+  # Current partitions keeps track of all the dataset partitions on the edges of the graph
+  current_partitions_l = list(iris_inp)
+  # Current nodes keeps track of all nodes that need to be split in the graph
+  current_nodes_l = list(my_tree)
+  
+  new_nodes_l = list()
+  new_partitions_l = list()
+  
+  # Loop as long as there are partitions that are not leaf nodes
+  while (length(current_partitions_l) > 0) {
+  
+    # Every dataset partition needs to end up either in a leaf node or split further  
+    for (i in 1:length(current_partitions_l)) {
+    
+      current_partition =  current_partitions_l[[i]]
+      update_results = update_node(current_nodes_l[[i]], current_partition, available_params, 
+                                   new_nodes_l, new_partitions_l, leaf_number, isolation_heights) 
+      
+      # Assigning the results of the update to new temporary variables 
+      new_nodes_l = update_results[[1]]
+      new_partitions_l = update_results[[2]]
+      leaf_number = update_results[[3]]
+      isolation_heights = update_results[[4]]
+    }
+    
+    # Updating the current values as all the available nodes have been either split or classified as leafs
+    current_partitions_l = new_partitions_l
+    current_nodes_l = new_nodes_l
+    
+    # Resetting the temporary variables for the next tree level
+    new_nodes_l = list()
+    new_partitions_l = list()
+  
+  }
+
+  tree_l[[iso_tree]] = my_tree
+  isolation_height_l[[iso_tree]] = isolation_heights
+}
+
+trees_to_plot = sample(1:10, 2)
+```
+
+Let's plot two of the trees that we so carefully developed.   
+
+<span style="color: red;font-weight: bold;">Take note of the color of the nodes: </span>
+
+* **Blue** indicates that coming into this node both Bob and Ernie are in the same dataset partition  
+* **Green** indicates that coming into this node only Ernie is left in this partition  
+* **Purple** indicates that coming into this node only Bob is left in this partition  
+* **Grey** indicates that neither Bob nor Ernie are in this partition
+
+
+**Forest #`r trees_to_plot[1]`**
+
+```{r iris tree 1, fig.height = 4, fig.width=10, echo=F}
+plot(tree_l[[trees_to_plot[1]]])
+```
+
+**Forest #`r trees_to_plot[2]`**
+
+```{r iris tree 2, fig.height = 4, fig.width=10, echo=F}
+plot(tree_l[[trees_to_plot[2]]])
+
+```
+
+These are just two example trees that showcase how the data are split and at which point in the tree is Bob or Ernie isolated. The next step is to plot the path length that we need to traverse in order to isolate Ernie and Bob for each of the forests. 
+
+```{r path length, fig.height = 7, fig.width=8, echo=F}
+edge_travel_dt = data.table(`Tree number` = 1:10)
+edge_travel_dt[, Bob := unname(sapply(isolation_height_l, `[`, "Bob"))]
+edge_travel_dt[, Ernie := unname(sapply(isolation_height_l, `[`, "Ernie"))]
+
+edge_travel_dt = melt(edge_travel_dt, id.vars = "Tree number", variable.name= "Observation", value.name="Edges")
+
+p1 = ggplot(edge_travel_dt, aes(x = factor(`Tree number`), y = Edges, color = Observation, group=Observation)) +
+        geom_line() +
+        geom_point(size = 2) + 
+        scale_color_manual(values = c("Bob" = "purple", "Ernie"="chartreuse4")) +
+        labs(title = "Path length until isolation by tree", x = "Tree number", y = "Path length") +
+        theme(panel.grid = element_blank(),
+              legend.title = element_blank())
+
+mean_dt = edge_travel_dt[, .(`Mean path length` = mean(Edges)), by = Observation]
+
+p2 = ggplot(mean_dt, aes(x = Observation, y = `Mean path length`, fill = Observation)) +
+      geom_col(width = 0.45) +
+      coord_flip() +
+      scale_y_continuous(expand = expansion(add = 0.05)) + 
+      scale_fill_manual(values = c("Bob" = "purple", "Ernie"="chartreuse4"), guide="none") +
+      labs(title = "Average path length of Bob and Ernie", y = "Path length") +
+      theme(panel.grid = element_blank(),
+            legend.title = element_blank(),
+            axis.title.y = element_blank(), 
+            panel.border = element_blank(),
+            axis.line.x.bottom  = element_line(color = 'gray'),
+            axis.line.y.left  = element_line(color = 'gray'))
+
+plot_grid(p1, p2, nrow = 2)
+```
+
+From the chart it becomes obvious that Bob gets isolated on average faster than Ernie (smaller number of edges traversed). Therefore, in the Isolation Forest algorithm it will get a higher potential outlier score. Let's check it out: 
+
+```{r iso forest Bob Ernie, figure.height=6, figure.width=8, echo=F}
+iso_f = isolation.forest(iris_inp[, -"Name"])
+scores = predict(iso_f, iris_inp[, -"Name"])
+
+ggplot(iris_inp, aes(x = Sepal.Length, y = Sepal.Width, colour = scores)) +
+  geom_point(size=2) +
+  scale_color_gradient(low = "lightgreen", high="red", name = "Score") +
+  new_scale_color() + 
+  geom_text_repel(size = 6, aes(label=ifelse(Name %in% c("Bob", "Ernie"), Name,""), colour = Name), box.padding = 0.5) +
+  scale_color_manual(values = c("Bob"="purple", "Ernie"="chartreuse4"), guide="none") +
+  labs(title="Isolation forest score for Bob and Ernie") +
+  theme(panel.grid = element_blank())
+
+```
+
+The Isolation Forest algorithm agrees with our empirical observations and gave Bob a higher score (more likely to be an outlier) compared to Ernie.  
+ 
+ 
+  
+#### Quick note on the actual Isolation Forest scoring
+
+While we saw how to calculate the path length (edges traversed) until we isolate an observation, it is still not clear how to read the score produced by the Isolation Forest algorithm.
+
+The anomaly score for an instance **x** given number of observations **n** is defined as:
+
+$$\large s(x, n) = 2^{\frac {−E(h(x))} {c(n)}} = {\frac 1 {2^{\frac {E(h(x))} {c(n)}}}}$$
+
+where 
+
+$$ E(h(x))\ \text{is the average path length for the observation over all the trees} $$ 
+
+$$ c(n)\ \text{is the expected path length based on Binary Search Tree (BST) calcualtions} $$ 
+
+Essentially, this formula calculates a score based on how the average path length for observation x compares with the expected path length. 
+
+We have the following 3 cases:
+
+$$\text{1) x long path} \implies E(h(x)) > c(n) \implies s(x,n) < 0.5 \implies \text{Safe}$$
+$$\text{2) x average path} \implies E(h(x)) = c(n) \implies s(x,n)=0.5 \implies \text{Probably safe}$$
+$$\text{3) x short path} \implies E(h(x)) < c(n) \implies s(x,n)>0.5 \implies \text{Potential outlier}$$
+
+
+If you are curious to get more details, a great resource I found is [this great blogpost](https://deltag270510082.wordpress.com/2021/04/15/1437/).
+
+
+### 1.1.3 Implementation in the survey data
+
+Now that we know what an Isolation Forest is and how it works, we can implement it for the survey data.
+I selected the following variables to be used:
+
+**Score variables:**  
+DAS score: Sum of the responses to the DAS questionnaire  
+TIPI score: Sum of the responses to the TIPI statements  
+Vocab. score: Sum of the responses to the English word questionnaire
+
+**Demographic variables:**  
+education  
+urban  
+gender  
+engnat  
+age  
+hand  
+orientation  
+familysize
+
+Let's briefly have a look at how they are distributed:
+
+```{r isoforest prep, include=F}
+question_cols = names(input)[grepl("^Q.*A$", names(input))]
+vcl_cols = names(input)[grepl("^VCL", names(input))]
+tipi_cols = names(input)[grepl("^TIPI", names(input))]
+
+input[, `TIPI score` := rowSums(.SD), .SDcols=tipi_cols]
+input[, `DAS score` := rowSums(.SD), .SDcols=question_cols]
+input[, `Vocab. score` := rowSums(.SD), .SDcols=vcl_cols]
+
+iso_data = input[, .(`TIPI score`, `DAS score`, `Vocab. score`, age, education, urban, gender, hand, orientation, familysize, engnat)]
+
+cat_cols = c("education", "urban", "gender", "hand", "orientation", "engnat")
+
+```
+
+```{r numerical plot, fig.width = 8, echo = F}
+num_plot_bef_dt = iso_data[, -..cat_cols]
+num_cols = names(num_plot_bef_dt)
+num_plot_bef_dt[, names(num_plot_bef_dt) := lapply(.SD, as.integer), .SDcols = names(num_plot_bef_dt)]
+num_plot_bef_dt = melt(num_plot_bef_dt, id.vars=integer())
+
+ggplot(num_plot_bef_dt, aes(x = value, fill = variable)) +
+                geom_bar(width = 1) +
+                facet_wrap(variable ~ ., scales = "free", nrow = 2) +
+                scale_fill_manual(guide="none", values = plot_colors) +
+                scale_y_continuous(label = comma) + 
+                labs(title = "Distribution of numerical variables") +
+                theme(plot.title = element_text(hjust = 0.5),
+                      strip.text = element_text(color = "black"),
+                      strip.background = element_rect(fill = "white"),
+                      panel.grid.major = element_blank(),
+                      panel.grid.minor = element_blank(),
+                      legend.title = element_blank(),
+                      axis.title.x = element_blank(),
+                      axis.title.y = element_blank())
+
+
+```
+
+Two things stand out to me:  
+1. There are clearly some outliers in the familysize and age variables as the density extends beyond 200 and 100 respectively  
+2. The TIPI score distribution is concentrated around ~ 44
+
+The center of the TIPI score has a reasonable explanation if we think about how the TIPI statements are designed.  
+TIPI statements have both sides of the coin in them: 
+For example, statement 1 is "Extroverted, enthusiastic." while statement 6 is "Reserved, quiet.". All of the statements are scored on a scale from 1 to 7.  
+Given that we have 10 statements where half are reversed, the expectation is that for each pair the total statement score is around 8, or an overall score of around 40 (8*5). Naturally though, we are human beings so such a relationship does not hold fully.
+
+
+```{r categorical plot, fig.asp = 0.8, fig.width = 8, echo=F}
+cat_plot_bef_dt = iso_data[, ..cat_cols]
+cat_plot_bef_dt = melt(cat_plot_bef_dt, id.vars = integer())
+cat_plot_bef_dt = cat_plot_bef_dt[, .(Participants = .N), by= .(variable, value)]
+cat_plot_bef_dt[, value := str_wrap(value, 15)]
+cat_plot_bef_dt[, value := reorder_within(value, Participants, variable)]
+
+ggplot(cat_plot_bef_dt, aes(x = value, fill = variable, y = Participants)) +
+                geom_col() +
+                coord_flip() +
+                scale_y_continuous(labels = comma, expand = expansion(add=15)) +
+                scale_x_reordered() +
+                scale_fill_manual(guide="none", values = plot_colors) +
+                facet_wrap(variable ~ ., scales = "free", nrow = 3) +
+                labs(title = "Distribution of categorical variables") +
+                theme(plot.title = element_text(hjust = 0.5),
+                      strip.text = element_text(color = "black"),
+                      strip.background = element_rect(fill = "white"),
+                      panel.grid.major = element_blank(),
+                      panel.grid.minor = element_blank(),
+                      legend.title = element_blank(),
+                      axis.title.x = element_blank(),
+                      axis.title.y = element_blank(),
+                      plot.margin = margin(10, 50, 10, 10))
+
+
+```
+
+For the categorical variables the following stand out:  
+1. The participants are mostly female  
+2. Most of the participants identify themselves as heterosexual  
+3. Most of the participants identify themselves as right handed
+
+
+
+**Time to implement the Isolation Forest on our data**
+
+*Note on categorical variables:*
+
+*In order to use categorical variables in the "isotree" package, they need to be converted to integer ordinal values* *starting from 0 (e.g. for a categorical variable with 3 levels, they would need to be mapped to values 0,1,2* *respectively)*
+
+
+
+```{r ISOFO prep, include=F}
+
+isof = isolation.forest(iso_data, seed = 1)
+pred = predict(isof, iso_data)
+
+```
+
+
+```{r ISOFO plot, fig.height=5, fig.width=7, echo=F}
+h_end = round(max(pred)/0.05)*0.05
+h_start = round(min(pred)/0.05)*0.05 - 0.05
+if (h_start %/% 2 != 0) {
+  h_start = h_start - 0.01
+}
+
+ggplot(data.frame(pred), aes(x = pred, fill = ifelse(pred <= 0.5, "safe", "outlier"))) +
+  geom_histogram(breaks=seq(h_start, h_end, 0.02)) +
+  geom_vline(aes(xintercept = 0.5), size = 1, colour = "red") +
+  scale_y_continuous(label = comma, expand = expansion(add = 2)) +
+  scale_fill_manual(values = c("safe" = "chartreuse4", "outlier"="purple"), guide="none") +
+  labs(title="Histogram of outlier scores", x = "Outlier score", y = "Participants") +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+
+```
+
+We can see that the majority of observations has a score below 0.5 and there are `r iso_data[pred > 0.5, .N]` observations with a score above 0.5.  
+
+**How can we determine which ones to keep and which ones to discard?**  
+
+I do not have a definitive answer to this (and for all I know there isn't one). I believe that it can be determined based on expert knowledge but in this notebook I chose to use 0.5 as the cutoff. 
+
+Please note:
+**This is not a definitive cutoff and I encourage you to try others**
+
+We can have a look at how the dataset variables are distributed for the anomalous and non-anomalous samples:
+
+```{r anomaly num chart, fig.width=8, fig.asp=1.2, echo=F}
+
+iso_data[, score:=pred]
+iso_data[, anomaly := ifelse(score > 0.5, "Anomalous", "Normal")]
+
+plot_cols = c(num_cols, "anomaly")
+num_plot_comp_dt = iso_data[, ..plot_cols]
+
+num_plot_comp_dt[, setdiff(names(num_plot_comp_dt), "anomaly") := lapply(.SD, as.integer), .SDcols = setdiff(names(num_plot_comp_dt), "anomaly")]
+
+num_plot_comp_dt = melt(num_plot_comp_dt, id.vars="anomaly")
+num_plot_comp_dt[, total := sum(value), by = .(anomaly, variable)]
+num_plot_comp_dt[, percent := value / total]
+
+num_plot_comp_dt[, y_min := 0]
+num_plot_comp_dt[, y_max := 1.1*max(percent), by = .(variable)]
+
+
+plot_list = list()
+ 
+list_counter = 1
+
+
+for (plot_var in c("TIPI score", "DAS score", "Vocab. score", "age", "familysize")){
+  
+  plot_list[[list_counter]] = ggplot(num_plot_comp_dt[variable == plot_var], 
+                                     aes(x = value, fill = variable, y = percent)) +
+                geom_bar(stat= "identity", width=1) +
+                scale_fill_manual(guide="none", values = plot_colors[list_counter]) +
+                facet_wrap(. ~  anomaly,  nrow=1) +
+                labs(subtitle = plot_var) +
+                theme(plot.title = element_text(hjust = 0.5),
+                      plot.subtitle=element_text(size=10), 
+                      strip.text = element_text(color = "black"),
+                      strip.background = element_rect(fill = "white"),
+                      panel.grid.major = element_blank(),
+                      panel.grid.minor = element_blank(),
+                      panel.border = element_blank(),
+                      axis.line  = element_line(color = 'gray'),
+                      axis.title.y = element_blank(),
+                      axis.title.x = element_blank())
+  list_counter = list_counter + 1
+}
+
+plot_list[[1]] = plot_list[[1]] + ggtitle("Numerical features by sample category")
+
+plot_grid(plotlist = plot_list, ncol = 1)
+
+
+```
+
+The side by side comparison can help draw some valuable conclusions:  
+1. The normal distributions are noticeably smoother than the anomalous ones  
+2. Anomalous distributions have spikes in extreme values on the high side for all variables  
+2. For the family size and age variables the anomalous samples are significantly more spread out to the extremes while the normal samples range to size `r iso_data[anomaly == "Normal", max(familysize)]` and age `r iso_data[anomaly == "Normal", max(age)]` respectively
+
+```{r anomaly cat chart, fig.height = 10, fig.width=8, fig.asp=1.2, echo=F}
+plot_cols = c(cat_cols, "anomaly")
+
+
+cat_plot_dt = iso_data[, ..plot_cols]
+cat_plot_dt = melt(cat_plot_dt, id.vars = "anomaly")
+cat_plot_dt = cat_plot_dt[, .(Participants = .N), by = .(anomaly, variable, value)]
+cat_plot_dt[, total_var_participants := sum(Participants), by = .(anomaly, variable)]
+cat_plot_dt[, percent := Participants/total_var_participants]
+cat_plot_dt[, value := str_wrap(value, 15)]
+cat_plot_dt[, value := reorder_within(value, percent, list(variable))]
+
+ggplot(cat_plot_dt, aes(x = value, fill = variable, y= percent)) +
+                geom_col() +
+                coord_flip() +
+                facet_grid(variable ~ anomaly, scales = "free") +
+                scale_y_continuous(labels = percent, expand = expansion(add=0.01)) +
+                scale_x_reordered() +
+                scale_fill_manual(guide="none", values = plot_colors) +
+                labs(title = "Categorical features by sample category") +
+                theme(plot.title = element_text(hjust = 0.5),
+                      strip.text = element_text(color = "black"),
+                      strip.background = element_rect(fill = "white"),
+                      panel.grid.major = element_blank(),
+                      panel.grid.minor = element_blank(),
+                      legend.title = element_blank(),
+                      axis.title.x = element_blank(),
+                      axis.title.y = element_blank())
+
+
+
+
+
+```
+
+For the categorical variables, the differences in the distribution of anomalous and normal samples are not that striking as with the numerical ones.  
+One noticeable difference is that the "Unknown" entries constitute a more significant part of the anomalous samples. 
+
+# 2. EDA `r emo::ji("cinema")`
+
+## 2.1 Who answered the survey?
+
+
+```{r participants by country and gender, fig.height = 6, fig.width=7, echo = F}
+# Filtering out outliers
+input = input[pred <= 0.5]
+
+country_gen_data = input[, .(Participants = .N), by = .(country, gender)][, country_part := sum(Participants), by=country]
+top_countries =  country_gen_data[, max(country_part), by = country][order(-V1), country][1:10]
+
+country_gen_chart = country_gen_data[, .(Participants=sum(Participants)), by=.(country= ifelse(country %in% top_countries, country, "Other"), gender)]
+country_gen_chart[, country_part := sum(Participants), by=country]
+
+ggplot(country_gen_chart, aes(x = reorder(country, country_part), y = Participants, fill=gender)) +
+  geom_col(width=0.75) +
+  coord_flip() +
+  scale_y_continuous(label = comma, expand = expansion(add = 100)) +
+  scale_fill_manual(values= c("Male"="#647C32", "Female"="#ccccff", "Other"="wheat", "Unknown"="grey")) +
+  #scale_x_discrete(expand=c(-1, 0)) +
+  labs(title = "Survey participants by country and gender", x = NULL) +
+  theme(strip.text = element_text(color = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.title = element_blank(),
+        axis.title.x = element_blank(),
+        panel.border = element_blank(),
+        axis.line.x.bottom  = element_line(color = 'gray'),
+        axis.line.y.left  = element_line(color = 'gray'),
+        legend.position="bottom",
+        text=element_text(family="sans"))
+```
+
+We can see that the majority of the participants is coming from Malaysia (around half of the dataset) and is female. This is another indication that the dataset cannot be used for making generalisations as it is really centered around 1 country.
+
+## 2.2 DAS survey 
+
+The DASS-42 is a 42 item self-report scale designed to measure the negative emotional states of depression, anxiety and stress. The principal value of the DASS in a clinical setting is to clarify the locus of emotional disturbance, as part of the broader task of clinical assessment. The essential function of the DASS is to assess the severity of the core symptoms of depression, anxiety and stress [source](https://www.healthfocuspsychology.com.au/tools/dass-42/).
+
+It should be noted that the results of the survey are not conclusive on their own and only serve as potential indications that a further clinical assessment might be needed.
+
+Let's make the data more useable by restructuring them from wide to long format and do some consistency checks.
+Please note that I subtracted 1 from the answer values in order to make it consistent with the scoring definitions I found online.
+
+```{r, echo=F}
+# Transforming the data into long format
+input[, ID:= 1:.N]
+
+survey_raw = input[, .SD, .SDcols = c("ID", names(input)[grepl("^Q", names(input))])]
+melted_survey = melt(survey_raw, id.vars = "ID", variable.name="Item", value.name = "Response")
+melted_survey[, c("Question", "Response type") := list(str_sub(Item,2,-2), str_sub(Item, start=-1))]
+melted_survey[, Item := NULL]
+survey_dat = dcast(melted_survey, ID + Question ~ `Response type`, value.var = "Response")
+names(survey_dat) = c("ID", "Question", "Answer", "Elapsed_time", "Order")
+survey_dat[, Answer := Answer - 1]
+
+# Data checks
+print(paste("All answers between 0 and 3:", survey_dat[, all(Answer %in% 0:3)]))
+print(paste("All times are numeric:", survey_dat[, all(!is.na(Elapsed_time))]))
+print(paste("All order values between 1 and 42:", survey_dat[, all(Order %in% 1:42)]))
+```
+
+### 2.2.1 How did the question replies vary by question?
+
+```{r average reply, fig.height = 6, fig.width=8, echo=F}
+avg_question_score = survey_dat[, .(`Average reply` = mean(Answer)), by = Question]
+avg_question_score[, Rank := rank(`Average reply`)]
+avg_question_score[, Color := ifelse(Rank %in% 1:6, "High", 
+                                     ifelse(Rank %in% (nrow(avg_question_score)-1):nrow(avg_question_score), "Low", "Mid"))]
+avg_reply = avg_question_score[, mean(`Average reply`)]
+
+ggplot(avg_question_score, aes(x = reorder(Question, `Average reply`), y = `Average reply`, fill = Color)) +
+  geom_col(width = 0.75) + 
+  geom_hline(yintercept = avg_reply, linetype="dashed", color = "black") +
+  annotate("text", x = 6, y = avg_reply + 0.05, label = "Mean reply score", size=6, colour="slategrey") + 
+  scale_fill_manual(values = c("High" = muted("green"), "Mid"="gray", "Low"=muted("red")), guide=NULL) +
+  scale_y_continuous(expand=c(0,0)) +
+  labs(title = "Average reply score by question number") +
+  theme(strip.text = element_text(color = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        axis.line.x.bottom  = element_line(color = 'gray'),
+        axis.line.y.left  = element_line(color = 'gray'),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+```
+
+#### Which questions are on the top and bottom range?
+
+#### The positives - Physically noticeable symptoms are rare
+
+The 6 questions where the average response is closest to "Did not apply to me at all" are:
+
+* Question 23: *I had difficulty in swallowing.*
+* Question 15: *I had a feeling of faintness.*
+* Question 7: *I had a feeling of shakiness (eg, legs going to give way).*
+* Question 19: *I perspired noticeably (eg, hands sweaty) in the absence of high temperatures or physical exertion.*
+* Question 4: *I experienced breathing difficulty (eg, excessively rapid breathing, breathlessness in the absence of physical exertion).*
+* Question 41: *I experienced trembling (eg, in the hands).*
+
+All these questions have in common that they check whether DAS has a physical manifestation in the respondent. Thankfully, such occurrences are rare. 
+
+#### The negatives - Easily upset, sad and depressed
+
+The 2 questions that stand out on the other side of the coin (average response closer to "Applied to me very much, or most of the time") are:
+
+* Question 13: *I felt sad and depressed.*
+* Question 11: *I found myself getting upset rather easily.*
+
+
+### 2.2.2 How do the respondents score on the depression/anxiety/stress scale?
+
+The questionnaire of the dataset (DASS-42) was designed to measure the emotional states of depression, anxiety and stress. In order to be able to derive conclusions based on it, there is a scoring scale which can be found in [this link](https://neurocogsystem.com/wp-content/uploads/2021/02/DASS-42-Scoring.pdf).  
+Question scores relate to one of the three emotional states and for each state the total score from the relevant question is calculated and then assessed based on a certain scale.
+
+```{r scoring, echo=F}
+
+survey_dat[, Category := ifelse(Question %in% c(3,5,10,13,16,17,21,24,26,31,34,37,38,42), "Depression",
+                                           ifelse(Question %in% c(2,4,7,9,15,19,20,23,25,28,30,36,40,41), "Anxiety", "Stress"))]
+scoring_dat = survey_dat[, .(Score=sum(Answer)), by=.(ID, Category)]
+
+assessment_labels = c("Normal", "Mild", "Moderate", "Severe", "Extremely Severe")
+scoring_dat[Category == "Depression", Assessment := cut(Score, breaks=c(-1,9,13,20,27,42), labels=assessment_labels, ordered_result=T)]
+
+scoring_dat[Category == "Anxiety", Assessment := cut(Score, breaks=c(-1,7,9,14,19,42), labels=assessment_labels, ordered_result=T)]
+
+scoring_dat[Category == "Stress", Assessment := cut(Score, breaks=c(-1,14,18,25,33,42), labels=assessment_labels, ordered_result=T)]
+
+scoring_dat = scoring_dat[input[, .(gender,age,married,ID)], on="ID"]
+
+```
+
+```{r category scoring, fig.height = 8, fig.width=6, echo=F}
+scoring_category_chart = scoring_dat[, .(Participants = .N), by=.(Category, Assessment)]
+pal = colorRampPalette(c("palegreen3", muted("red")))
+
+ggplot(scoring_category_chart, aes(x=Assessment, y=Participants, fill=Assessment)) +
+  geom_col() +
+  coord_flip() +
+  facet_wrap(Category ~ ., nrow=3, ncol=1, scales="free") +
+  scale_fill_discrete(guide=NULL, palette=pal) +
+  scale_y_continuous(label=comma, expand = expansion(add=100), limits=c(0, 14500)) + 
+  labs(title = "Participants by severity of emotional state") + 
+  theme(strip.text = element_text(size=13, color = "black"),
+        strip.background =element_rect(fill="white"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        panel.border = element_blank(),
+        axis.line.x.bottom  = element_line(color = 'gray'),
+        plot.title = element_text(hjust=-0.6))
+
+```
+
+Only based on the results of the survey **(please note once again that this is not a sufficient metric, expert assessment is needed to be able to derive reliable conclusions)**, a high number of participants score in the extremely severe bracket for both depression and anxiety. The breakdown for stress appears to be more positive and a significant number of participants show normal levels of stress. 
+
+### 2.2.3 How much correlation is there between questions by category?
+
+The next question I wanted to address through the data was the correlation between the question scores for the same emotional state. For example, does a person who scores highly on one Depression related question score also highly in other Depression questions?
+
+
+```{r cor prep, include=F}
+
+cor_dat = dcast(survey_dat, ID ~ Question, value.var = "Answer")
+correlations = cor(cor_dat[, -"ID"])
+
+cor_plot_data = reshape2::melt(correlations)
+setDT(cor_plot_data)
+
+names(cor_plot_data) = c("Question_1", "Question_2", "Correlation")
+
+cor_plot_data[unique(survey_dat[, .(Question=as.numeric(Question), Category)]), on=c(Question_1="Question"), Category_1:=i.Category]
+
+cor_plot_data[unique(survey_dat[, .(Question=as.numeric(Question), Category)]), on=c(Question_2="Question"), Category_2:=i.Category]
+
+cor_plot_data = cor_plot_data[Question_1 != Question_2, mean(Correlation), by = .(Category_1, Category_2)]
+cor_plot_data[, dupl := 1:.N, by=round(V1,4)]
+cor_plot_data[dupl==2, V1:=NA][, dupl:=NULL]
+
+
+```
+```{r question correlation, fig.height = 3, fig.width=5, echo=F, warning=F}
+
+ggplot(cor_plot_data, aes(x=Category_2, y=Category_1, fill=V1)) +
+  geom_raster() +
+  geom_text(aes(label=round(V1,2)), colour = "white", size=5) +
+  scale_fill_continuous(low="skyblue", high="darkblue", na.value="white",guide="none") +
+  scale_x_discrete(expand = expansion(add=0.1)) +
+  scale_y_discrete(expand = expansion(add=0.1)) +
+  labs(title=str_wrap("Average correlation between questions by emotional state", 40)) +
+  theme(plot.title = element_text(size = 12),
+        axis.title = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.border = element_blank())
+```
+
+We can see that overall there is a correlation between the responses, the highest appears to be in the Depression related questions. 
+
+## 2.3 TIPI data
+
+The Ten Item Personality Inventory is a test in order to assess 5 personality traits of participants:  
+1. Extraversion  
+2. Agreeableness  
+3. Conscientiousness  
+4. Emotional Stability  
+5. Openness  
+
+The design of the test aims to retain breadth of coverage, represent both poles of each dimension, avoid items that were evaluatively extreme, simply negations as well as redundancy among items ([according to the paper](http://gosling.psy.utexas.edu/wp-content/uploads/2014/09/JRP-03-tipi.pdf)).
+
+Each item consists of two descriptors, using the common stem, "I see myself as:". Each of the five items is rated on a 7-point scale ranging from 1 (disagree strongly) to 7 (agree strongly).
+
+```{r wide to long TIPI, include=F}
+
+tipi_an_cols = c("ID", "age", "gender", tipi_cols)
+
+tipi_dt = input[, ..tipi_an_cols]
+tipi_dt[, (tipi_cols) := lapply(.SD, as.integer), .SDcols = tipi_cols]
+tipi_dt = melt(tipi_dt, id.vars = c("ID", "age", "gender"), variable.name = "Item", value.name = "Score")
+tipi_dt[, Item := as.integer(gsub("TIPI", "", Item))]
+
+
+# Preparing age groups
+tipi_dt[, `Age group` := cut(age, breaks = c(1, 18, 25, 35, 100), labels = c("Below 18", "18-24", "25-34", "35 and above"), right = F)]
+
+
+# Item category
+tipi_dt[Item %in% c(1, 6), Category := "Extraversion"]
+tipi_dt[Item %in% c(2, 7), Category := "Agreeableness"]
+tipi_dt[Item %in% c(3, 8), Category := "Conscientiousness"]
+tipi_dt[Item %in% c(4, 9), Category := "Emotional Stability"]
+tipi_dt[Item %in% c(5, 10), Category := "Openness"]
+
+# Reversing opposite scores
+tipi_dt[, adjusted_score := Score]
+tipi_dt[Item %in% c(6, 2, 8, 4, 10), adjusted_score := 7-adjusted_score]
+
+
+
+```
+
+```{r tipi gender plot, echo = F}
+
+tipi_gender = tipi_dt[, .(Score = mean(adjusted_score)), by = .(Category, gender)]
+tipi_gender[, Score := round(Score, 2)]
+
+
+ggplot(tipi_gender, aes(x = Category, y = Score, fill = gender)) +
+  geom_col(position="dodge") +
+  coord_flip() +
+  scale_y_continuous(expand = expansion(add=0), limits = c(0,7), breaks = c(1, 3,5, 7)) +
+  scale_fill_manual(values= c("Male"="#647C32", "Female"="#ccccff", "Other"="wheat", "Unknown"="grey")) +
+  labs(title = "Personality trait score by gender") +
+  theme(axis.title = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank(),
+        #plot.title = element_text(face = "italic", color = "black"),
+        legend.title = element_blank(),
+        legend.position = "bottom")
+
+
+```
+
+Two things that stand out from the chart:  
+1. The "Other" gender category scores significantly lower for Extraversion and Emotional Stability and to a lesser extent Conscientiousness  
+2. The "Male" category scores comparatively higher in the Emotional Stability category
+
+
+```{r tipi age plot, echo=F}
+
+tipi_age = tipi_dt[, .(Score = mean(adjusted_score)), by = .(Category, `Age group`)]
+tipi_age[, Score := round(Score, 2)]
+
+
+ggplot(tipi_age, aes(x = Category, y = Score, fill = `Age group`)) +
+  geom_col(position="dodge") +
+  coord_flip() +
+  scale_y_continuous(expand = expansion(add=0), limits = c(0,7), breaks = c(1, 3,5, 7)) +
+  scale_fill_manual(values= c("#C7E9C0", "#74C476", "#238B45", "#00441B")) +
+  labs(title = "Personality trait score by age group") +
+  theme(axis.title = element_blank(),
+        axis.ticks = element_blank(),
+        panel.grid = element_blank(),
+        #plot.title = element_text(face = "italic", color = "black"),
+        legend.title = element_blank(),
+        legend.position = "bottom")
+
+```
+
+From this breakdown, we observe the following:  
+1. The higher the age group, the higher the value in how they view themselves. Perhaps this is indeed influenced by age as one understands their character better.  
+2. The "Below 18" group scores really low for Emotional Stability
+
+
+# 3. Conclusions
+                                           
+This notebook is simply a glimpse of the types of analysis that can be performed using this dataset. 
+I encourage you to try it out, perhaps build on top of mine if for example the cleaning procedure seemed adequate based on your needs.  
+If you made it this far, thank you for going through the whole notebook and I hope you found it useful!  
+    
+                                             
+
+    
+
+
