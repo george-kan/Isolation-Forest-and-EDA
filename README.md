@@ -12,4 +12,4 @@ Survey results for depression, anxiety and stress:
 <img src="https://user-images.githubusercontent.com/56187121/147262695-64204be9-ce43-4c56-91b8-a6e557cf497a.png" width = 500 height=700/>
 
 Personality traits of the participants by age group:  
-<img src="https://user-images.githubusercontent.com/56187121/147262697-70e93382-69cc-456c-8f6c-9bfa4581155f.png" width = 500 height=700/>
+<img src="https://user-images.githubusercontent.com/56187121/147262697-70e93382-69cc-456c-8f6c-9bfa4581155f.png" width = 600 height=700/>
